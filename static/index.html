@@ -5,100 +5,214 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Cloud-Scale Image Processor</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; line-height: 1.6; }
-        .upload-box { border: 2px dashed #ccc; padding: 30px; text-align: center; border-radius: 8px; background: #fafafa; cursor: pointer; }
-        .upload-box:hover { border-color: #0066cc; background: #f0f7ff; }
-        button { background: #0066cc; color: white; border: none; padding: 10px 20px; border-radius: 4px; font-size: 16px; cursor: pointer; width: 100%; margin-top: 15px; }
-        button:disabled { background: #ccc; }
-        #status { margin-top: 20px; font-weight: bold; color: #333; text-align: center; }
-        input[type="file"] { display: none; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 500px;
+            margin: 50px auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+
+        .upload-box {
+            border: 2px dashed #ccc;
+            padding: 30px;
+            text-align: center;
+            border-radius: 8px;
+            background: #fafafa;
+            cursor: pointer;
+        }
+
+        .upload-box:hover {
+            border-color: #0066cc;
+            background: #f0f7ff;
+        }
+
+        button {
+            background: #0066cc;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 15px;
+        }
+
+        button:disabled {
+            background: #ccc;
+        }
+
+        #status {
+            margin-top: 20px;
+            font-weight: bold;
+            color: #333;
+            text-align: center;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
     </style>
 </head>
 <body>
 
-    <h2>📷 Cloud Image Processor</h2>
-    <p>Upload a high-res image. It will upload directly to S3 via a Presigned URL, and our background worker will optimize it.</p>
+<h2>📷 Cloud Image Processor</h2>
 
-    <div class="upload-box" onclick="document.getElementById('fileInput').click()">
-        <span id="uploadLabel">Click to select an image file</span>
-        <input type="file" id="fileInput" accept="image/*">
-    </div>
+<p>
+    Upload a high-resolution image. It will upload directly to Amazon S3 using a
+    pre-signed URL, then an ECS worker will resize it in the background.
+</p>
 
-    <button id="uploadBtn" onclick="startProcess()" disabled>Upload & Process</button>
-    <div id="status"></div>
+<div class="upload-box" onclick="document.getElementById('fileInput').click()">
+    <span id="uploadLabel">Click to select an image</span>
+    <input type="file" id="fileInput" accept="image/*">
+</div>
+
+<button id="uploadBtn" onclick="startProcess()" disabled>
+    Upload & Process
+</button>
+
+<div id="status"></div>
 
 <script>
-    const fileInput = document.getElementById('fileInput');
-    const uploadLabel = document.getElementById('uploadLabel');
-    const uploadBtn = document.getElementById('uploadBtn');
-    const statusDiv = document.getElementById('status');
 
-    fileInput.addEventListener('change', () => {
-        if (fileInput.files.length > 0) {
-            uploadLabel.innerText = `Selected: ${fileInput.files[0].name}`;
-            uploadBtn.disabled = false;
+const fileInput = document.getElementById("fileInput");
+const uploadLabel = document.getElementById("uploadLabel");
+const uploadBtn = document.getElementById("uploadBtn");
+const statusDiv = document.getElementById("status");
+
+fileInput.addEventListener("change", () => {
+    if (fileInput.files.length > 0) {
+        uploadLabel.innerText = `Selected: ${fileInput.files[0].name}`;
+        uploadBtn.disabled = false;
+    }
+});
+
+async function startProcess() {
+
+    const file = fileInput.files[0];
+
+    if (!file) return;
+
+    uploadBtn.disabled = true;
+
+    statusDiv.innerHTML = "🔄 Step 1: Requesting secure upload URL...";
+
+    try {
+
+        // ✅ Relative URL (works behind ALB)
+        const apiResponse = await fetch(
+            `/generate-upload-url?filename=${encodeURIComponent(file.name)}`
+        );
+
+        if (!apiResponse.ok) {
+            throw new Error("Failed to get upload URL");
         }
-    });
 
-    async function startProcess() {
-        const file = fileInput.files[0];
-        if (!file) return;
+        const data = await apiResponse.json();
 
-        uploadBtn.disabled = true;
-        statusDiv.innerHTML = "🔄 Step 1: Requesting secure upload URL...";
+        const uploadUrl = data.upload_url;
+        const fileKey = data.file_key;
+
+        statusDiv.innerHTML = "📤 Step 2: Uploading directly to Amazon S3...";
+
+        const s3Response = await fetch(uploadUrl, {
+            method: "PUT",
+            headers: {
+                "Content-Type": file.type
+            },
+            body: file
+        });
+
+        if (!s3Response.ok) {
+            throw new Error("S3 upload failed.");
+        }
+
+        statusDiv.innerHTML =
+            "⏳ Step 3: Waiting for ECS worker to process image...";
+
+        pollForThumbnail(fileKey);
+
+    } catch (err) {
+
+        console.error(err);
+
+        statusDiv.innerHTML = `❌ Error: ${err.message}`;
+
+        uploadBtn.disabled = false;
+    }
+}
+
+async function pollForThumbnail(fileKey) {
+
+    const interval = setInterval(async () => {
 
         try {
-            const apiResponse = await fetch(`http://127.0.0.1:8000/generate-upload-url?filename=${encodeURIComponent(file.name)}`);
-            if (!apiResponse.ok) throw new Error("Failed to get upload URL");
-            
-            const data = await apiResponse.json();
-            const uploadUrl = data.upload_url;
-            const fileKey = data.file_key; // The unique key generated by backend
 
-            statusDiv.innerHTML = "📤 Step 2: Uploading directly to S3...";
+            // ✅ Relative URL (works behind ALB)
+            const response = await fetch(
+                `/get-download-url?file_key=${encodeURIComponent(fileKey)}`
+            );
 
-            const s3Response = await fetch(uploadUrl, {
-                method: 'PUT',
-                headers: { 'Content-Type': file.type },
-                body: file
-            });
+            if (!response.ok) {
+                return;
+            }
 
-            if (!s3Response.ok) throw new Error("S3 Upload Rejected.");
+            const data = await response.json();
 
-            statusDiv.innerHTML = "⏳ Step 3: Waiting for background worker to process image...";
-            
-            // Start polling for the finished thumbnail
-            pollForThumbnail(fileKey);
+            clearInterval(interval);
+
+            statusDiv.innerHTML = `
+                <div style="margin-top:20px;
+                            padding:15px;
+                            border-radius:6px;
+                            background:#f4fbf4;
+                            border:1px solid #28a745;">
+
+                    <p style="color:#28a745;font-weight:bold;">
+                        🎉 Thumbnail Ready!
+                    </p>
+
+                    <img
+                        src="${data.download_url}"
+                        alt="Thumbnail"
+                        style="
+                            max-width:180px;
+                            display:block;
+                            margin:10px auto;
+                            border-radius:5px;
+                            border:1px solid #ddd;
+                        ">
+
+                    <a
+                        href="${data.download_url}"
+                        download="thumbnail.jpg"
+                        style="
+                            display:inline-block;
+                            margin-top:10px;
+                            background:#28a745;
+                            color:white;
+                            text-decoration:none;
+                            padding:10px 15px;
+                            border-radius:5px;
+                        ">
+                        Download Thumbnail
+                    </a>
+
+                </div>
+            `;
+
+            uploadBtn.disabled = false;
 
         } catch (err) {
-            statusDiv.innerHTML = `❌ Error: ${err.message}`;
-            uploadBtn.disabled = false;
+            // Keep polling until thumbnail exists.
         }
-    }
 
-    // Function to repeatedly check if worker finished processing
-    async function pollForThumbnail(fileKey) {
-        const checkInterval = setInterval(async () => {
-            try {
-                const response = await fetch(`http://127.0.0.1:8000/get-download-url?file_key=${encodeURIComponent(fileKey)}`);
-                if (response.ok) {
-                    const data = await response.json();
-                    clearInterval(checkInterval); // Stop polling
-                    
-                    statusDiv.innerHTML = `
-                        <div style="margin-top:20px; border: 1px solid #green; padding:15px; background:#f4fbf4; border-radius:6px;">
-                            <p style="color:green; margin-top:0;">🎉 Thumbnail ready!</p>
-                            <img src="${data.download_url}" style="max-width:150px; border-radius:4px; border:1px solid #ddd; display:block; margin: 10px auto;" alt="Thumbnail Preview"><br>
-                            <a href="${data.download_url}" download="thumbnail.png" style="background:#28a745; color:white; text-decoration:none; padding:8px 15px; border-radius:4px; display:inline-block; font-size:14px;">Download Compressed Image</a>
-                        </div>
-                    `;
-                    uploadBtn.disabled = false;
-                }
-            } catch (e) {
-                // Keep trying quietly until the file appears
-            }
-        }, 2000); // Check every 2 seconds
-    }
+    }, 2000);
+}
+
 </script>
+
 </body>
 </html>
