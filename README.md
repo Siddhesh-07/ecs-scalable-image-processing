@@ -1,4 +1,4 @@
-# 🚀 Cloud-Scale Image Processing System
+# 🚀 ECS - Image Processing
 
 **A production-grade, event-driven image processing pipeline built on AWS ECS, demonstrating scalability, cost optimization, and DevOps best practices.**
 
