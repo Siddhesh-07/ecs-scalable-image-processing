@@ -114,53 +114,65 @@ Result: User got response in 5 seconds
 
 ### **Architecture Decisions**
 
-Built a **heterogeneous capacity provider strategy** across two clusters:
-
-#### **Frontend Cluster (Fargate)**
-- **Why Fargate?** Stateless API, serverless (no EC2 management overhead)
-- **Capacity Provider Strategy:**
-  - **FARGATE (Base):** 1 task always running (stable baseline)
-  - **FARGATE_SPOT:** Auto-scales up to 4 total (70% cost savings)
-  - **Metric:** CPU utilization > 70%
-  - **Weight Ratio:** FARGATE:FARGATE_SPOT = 1:2 (2x more spot for burst)
-
-#### **Worker Cluster (EC2)**
-- **Why EC2?** Long-running batch jobs, more cost-effective at scale
-- **Capacity Provider Strategy:**
-  - **EC2 Spot ASG:** Base 1 worker → Max 6 workers
-  - **Metric:** CPU utilization > 50% (batch-heavy, scale earlier)
-  - **Auto Scaling:** Tied to ASG capacity provider
-  - **Cost:** ~90% cheaper than on-demand
-
----
+Consolidate frontend (Fargate) and worker (EC2) workloads into a single `image-cluster` using a heterogeneous capacity provider strategy. This eliminates cluster management overhead while maintaining workload isolation through service-level capacity provider configuration.
 
 ### **ECS Cluster Specs**
 
-#### **Cluster 1: Frontend Cluster**
+#### **Cluster: image-cluster**
 
 | Component | Specification |
 |-----------|---|
-| **Name** | `frontend-cluster` |
-| **Launch Type** | Fargate |
-| **Network Mode** | `awsvpc` (required for Fargate) |
-| **Task Count** | 1 base (scales to 4 max) |
-| **CPU** | 512 (0.5 vCPU) |
-| **Memory** | 1024 MB (1 GB) |
-
-#### **Cluster 2: Worker Cluster**
-
-| Component | Specification |
-|-----------|---|
-| **Name** | `image-processor-cluster` |
-| **Launch Type** | EC2 |
-| **Network Mode** | `bridge` (default for EC2) |
-| **Task Count** | 1 base (scales to 6 max) |
-| **CPU** | 512 (0.5 vCPU) |
-| **Memory** | 1024 MB (1 GB) |
-| **EC2 Instance Type** | t3.micro / t3.small |
-| **AMI** | Amazon Linux 2023 |
+| **Name** | `image-cluster` |
+| **Type** | Hybrid (Fargate + EC2) |
+| **Network Mode** | `awsvpc` (Fargate tasks), `bridge` (EC2 tasks) |
+| **Region** | us-east-1 |
 
 ---
+
+### **Capacity Providers**
+
+#### **Capacity Provider 1: Fargate On-Demand**
+
+| Component | Specification |
+|-----------|---|
+| **Name** | `fargate-cp` |
+| **Launch Type** | FARGATE |
+| **Network Mode** | `awsvpc` |
+| **Use Case** | Baseline frontend API (always available) |
+| **Cost Model** | Pay-per-second (on-demand) |
+| **Best For** | Reliable, stateless workloads |
+
+---
+
+#### **Capacity Provider 2: Fargate Spot**
+
+| Component | Specification |
+|-----------|---|
+| **Name** | `fargate-spot-cp` |
+| **Launch Type** | FARGATE_SPOT |
+| **Network Mode** | `awsvpc` |
+| **Use Case** | Auto-scale frontend API (burst traffic) |
+| **Cost Savings** | ~70% vs on-demand Fargate |
+| **Best For** | Fault-tolerant, scalable workloads |
+| **Task Weight Ratio** | FARGATE:FARGATE_SPOT = 1:2 |
+
+---
+
+#### **Capacity Provider 3: EC2 On-demand (spot is not for free tier)**
+
+| Component | Specification |
+|-----------|---|
+| **Name** | `ec2-spot-cp` |
+| **Launch Type** | EC2 |
+| **Network Mode** | `bridge` (default for EC2) |
+| **Instance Type** | t3.small |
+| **AMI** | Amazon Linux 2023 |
+| **ASG Config** | Min: 1 → Desired: 2 → Max: 2 |
+| **Best For** | Long-running batch jobs, image processing |
+| **Auto-Scaling** | CPU > 50%, scale-up: 60s, scale-down: 300s |
+
+---
+
 
 ### **Task Definition Specs**
 
